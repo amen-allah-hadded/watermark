@@ -16,4 +16,3 @@ pydub==0.25.1
 mutagen>=1.47.0
 Werkzeug>=3.0.0
 gunicorn>=21.2.0
-pyaudioop>=0.1.0
