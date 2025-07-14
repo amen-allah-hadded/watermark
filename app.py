@@ -1,22 +1,10 @@
-from flask import Flask, request, jsonify, send_file, render_template_string # type: ignore
+from flask import Flask, request, jsonify, send_file, render_template_string
 from flask_cors import CORS
 import os
 import numpy as np
 from scipy.fftpack import dct, idct
 import pywt
-# Import pydub with fallback for Python 3.13+ compatibility
-try:
-    from pydub import AudioSegment
-except ImportError as e:
-    print(f"Warning: pydub import failed: {e}")
-    # Alternative: try installing pyaudioop if available
-    try:
-        import subprocess
-        subprocess.check_call(['pip', 'install', 'pyaudioop'])
-        from pydub import AudioSegment
-    except:
-        print("Failed to install pyaudioop. Using alternative audio processing.")
-        AudioSegment = None
+from pydub import AudioSegment
 import zlib
 import tempfile
 import uuid
@@ -46,6 +34,552 @@ LOSSLESS_FORMATS = ["wav", "flac", "aiff"]
 LOSSY_FORMATS = ["mp3", "aac", "ogg", "wma", "m4a", "opus"]
 
 SUPPORTED_EXTENSIONS = ['wav', 'flac', 'aiff', 'mp3', 'ogg', 'aac', 'm4a', 'opus', 'wma']
+
+# Page HTML pour l'interface utilisateur
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Watermarking</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        h1 {
+            color: #2c3e50;
+            text-align: center;
+        }
+        .container {
+            background-color: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="text"], input[type="number"], input[type="file"], select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f0f8ff;
+            border-radius: 4px;
+            display: none;
+        }
+        .tabs {
+            display: flex;
+            margin-bottom: 20px;
+        }
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            background-color: #eee;
+            border: 1px solid #ddd;
+            flex: 1;
+            text-align: center;
+        }
+        .tab.active {
+            background-color: #3498db;
+            color: white;
+            border-color: #3498db;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        .progress-container {
+            width: 100%;
+            background-color: #f3f3f3;
+            border-radius: 4px;
+            margin: 15px 0;
+            display: none;
+        }
+        .progress-bar {
+            height: 20px;
+            background-color: #4CAF50;
+            border-radius: 4px;
+            width: 0%;
+            text-align: center;
+            line-height: 20px;
+            color: white;
+        }
+        .advanced-toggle {
+            text-align: center;
+            margin: 10px 0;
+            cursor: pointer;
+            color: #3498db;
+        }
+        .advanced-options {
+            display: none;
+            background-color: #f9f9f9;
+            padding: 15px;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        @media (max-width: 600px) {
+            body {
+                padding: 10px;
+            }
+            .container {
+                padding: 15px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h1>Audio Watermarking</h1>
+    
+    <div class="tabs">
+        <div class="tab active" id="embed-tab">Insérer un watermark</div>
+        <div class="tab" id="extract-tab">Extraire un watermark</div>
+    </div>
+    
+    <div class="tab-content active" id="embed-content">
+        <div class="container">
+            <form id="embed-form">
+                <div class="form-group">
+                    <label for="audio-file-embed">Fichier audio:</label>
+                    <input type="file" id="audio-file-embed" name="audio_file" accept=".wav,.flac,.aiff,.mp3,.ogg,.aac,.m4a,.opus,.wma">
+                </div>
+                
+                <div class="form-group">
+                    <label for="watermark-text">Texte du watermark (max 12 caractères):</label>
+                    <input type="text" id="watermark-text" name="watermark_text" maxlength="12" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="method-embed">Méthode:</label>
+                    <select id="method-embed" name="method">
+                        <option value="DCT">DCT</option>
+                        <option value="DWT-DCT">DWT-DCT</option>
+                    </select>
+                </div>
+                
+                <div class="advanced-toggle" id="advanced-toggle-embed">
+                    Afficher les options avancées ▼
+                </div>
+                
+                <div class="advanced-options" id="advanced-options-embed">
+                    <div class="form-group">
+                        <label for="segment-length">Longueur de segment:</label>
+                        <input type="number" id="segment-length" name="segment_length" value="2048" min="512" max="16384" step="512">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="seed">Seed:</label>
+                        <input type="number" id="seed" name="seed" value="42" min="1">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="modulation-strength">Force de modulation:</label>
+                        <input type="number" id="modulation-strength" name="modulation_strength" value="0.005" min="0.001" max="0.5" step="0.001">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="band-lower">Bande de fréquence inférieure (%):</label>
+                        <input type="number" id="band-lower" name="band_lower_pct" value="33" min="1" max="90">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="band-upper">Bande de fréquence supérieure (%):</label>
+                        <input type="number" id="band-upper" name="band_upper_pct" value="66" min="10" max="99">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="n-coeffs">Nombre de coefficients:</label>
+                        <input type="number" id="n-coeffs" name="n_coeffs" value="5" min="1" max="20">
+                    </div>
+                    
+                    <div class="dwt-options" style="display: none;">
+                        <div class="form-group">
+                            <label for="dwt-level">Niveau DWT:</label>
+                            <input type="number" id="dwt-level" name="dwt_level" value="1" min="1" max="5">
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="dwt-wavelet">Ondelette:</label>
+                            <select id="dwt-wavelet" name="dwt_wavelet">
+                                <option value="haar">haar</option>
+                                <!-- Les autres ondelettes seront chargées dynamiquement -->
+                            </select>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="dwt-coeff-type">Type de coefficient:</label>
+                            <select id="dwt-coeff-type" name="dwt_coeff_type">
+                                <option value="cA">cA (Approximation)</option>
+                                <option value="cD">cD (Détail)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                
+                <button type="submit">Insérer le watermark</button>
+            </form>
+            
+            <div class="progress-container" id="progress-container-embed">
+                <div class="progress-bar" id="progress-bar-embed">0%</div>
+            </div>
+            
+            <div class="result" id="result-embed">
+                <h3>Résultat:</h3>
+                <p id="result-text-embed"></p>
+                <div id="download-container"></div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="tab-content" id="extract-content">
+        <div class="container">
+            <form id="extract-form">
+                <div class="form-group">
+                    <label for="audio-file-extract">Fichier audio avec watermark:</label>
+                    <input type="file" id="audio-file-extract" name="audio_file" accept=".wav,.flac,.aiff,.mp3,.ogg,.aac,.m4a,.opus,.wma">
+                </div>
+                
+                <div class="form-group">
+                    <label for="watermark-length">Longueur attendue du watermark:</label>
+                    <input type="number" id="watermark-length" name="watermark_length" value="12" min="1" max="64">
+                </div>
+                
+                <div class="form-group">
+                    <label for="method-extract">Méthode:</label>
+                    <select id="method-extract" name="method">
+                        <option value="DCT">DCT</option>
+                        <option value="DWT-DCT">DWT-DCT</option>
+                    </select>
+                </div>
+                
+                <div class="advanced-toggle" id="advanced-toggle-extract">
+                    Afficher les options avancées ▼
+                </div>
+                
+                <div class="advanced-options" id="advanced-options-extract">
+                    <div class="form-group">
+                        <label for="segment-length-extract">Longueur de segment:</label>
+                        <input type="number" id="segment-length-extract" name="segment_length" value="2048" min="512" max="16384" step="512">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="seed-extract">Seed:</label>
+                        <input type="number" id="seed-extract" name="seed" value="42" min="1">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="modulation-strength-extract">Force de modulation:</label>
+                        <input type="number" id="modulation-strength-extract" name="modulation_strength" value="0.005" min="0.001" max="0.5" step="0.001">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="band-lower-extract">Bande de fréquence inférieure (%):</label>
+                        <input type="number" id="band-lower-extract" name="band_lower_pct" value="33" min="1" max="90">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="band-upper-extract">Bande de fréquence supérieure (%):</label>
+                        <input type="number" id="band-upper-extract" name="band_upper_pct" value="66" min="10" max="99">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="n-coeffs-extract">Nombre de coefficients:</label>
+                        <input type="number" id="n-coeffs-extract" name="n_coeffs" value="5" min="1" max="20">
+                    </div>
+                    
+                    <div class="dwt-options-extract" style="display: none;">
+                        <div class="form-group">
+                            <label for="dwt-level-extract">Niveau DWT:</label>
+                            <input type="number" id="dwt-level-extract" name="dwt_level" value="1" min="1" max="5">
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="dwt-wavelet-extract">Ondelette:</label>
+                            <select id="dwt-wavelet-extract" name="dwt_wavelet">
+                                <option value="haar">haar</option>
+                                <!-- Les autres ondelettes seront chargées dynamiquement -->
+                            </select>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="dwt-coeff-type-extract">Type de coefficient:</label>
+                            <select id="dwt-coeff-type-extract" name="dwt_coeff_type">
+                                <option value="cA">cA (Approximation)</option>
+                                <option value="cD">cD (Détail)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                
+                <button type="submit">Extraire le watermark</button>
+            </form>
+            
+            <div class="progress-container" id="progress-container-extract">
+                <div class="progress-bar" id="progress-bar-extract">0%</div>
+            </div>
+            
+            <div class="result" id="result-extract">
+                <h3>Watermark extrait:</h3>
+                <p id="result-text-extract"></p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Fonction pour charger les ondelettes disponibles
+        function loadWavelets() {
+            fetch('/api/wavelets')
+                .then(response => response.json())
+                .then(data => {
+                    const wavelets = data.wavelets;
+                    const selectEmbed = document.getElementById('dwt-wavelet');
+                    const selectExtract = document.getElementById('dwt-wavelet-extract');
+                    
+                    // Vider les sélecteurs
+                    selectEmbed.innerHTML = '';
+                    selectExtract.innerHTML = '';
+                    
+                    // Ajouter les ondelettes
+                    wavelets.forEach(wavelet => {
+                        const optionEmbed = document.createElement('option');
+                        optionEmbed.value = wavelet;
+                        optionEmbed.textContent = wavelet;
+                        selectEmbed.appendChild(optionEmbed);
+                        
+                        const optionExtract = document.createElement('option');
+                        optionExtract.value = wavelet;
+                        optionExtract.textContent = wavelet;
+                        selectExtract.appendChild(optionExtract);
+                    });
+                })
+                .catch(error => console.error('Erreur lors du chargement des ondelettes:', error));
+        }
+        
+        // Chargement des ondelettes au démarrage
+        document.addEventListener('DOMContentLoaded', loadWavelets);
+        
+        // Gestion des onglets
+        document.getElementById('embed-tab').addEventListener('click', function() {
+            document.getElementById('embed-tab').classList.add('active');
+            document.getElementById('extract-tab').classList.remove('active');
+            document.getElementById('embed-content').classList.add('active');
+            document.getElementById('extract-content').classList.remove('active');
+        });
+        
+        document.getElementById('extract-tab').addEventListener('click', function() {
+            document.getElementById('extract-tab').classList.add('active');
+            document.getElementById('embed-tab').classList.remove('active');
+            document.getElementById('extract-content').classList.add('active');
+            document.getElementById('embed-content').classList.remove('active');
+        });
+        
+        // Gestion des options avancées
+        document.getElementById('advanced-toggle-embed').addEventListener('click', function() {
+            const advancedOptions = document.getElementById('advanced-options-embed');
+            if (advancedOptions.style.display === 'block') {
+                advancedOptions.style.display = 'none';
+                this.textContent = 'Afficher les options avancées ▼';
+            } else {
+                advancedOptions.style.display = 'block';
+                this.textContent = 'Masquer les options avancées ▲';
+            }
+        });
+        
+        document.getElementById('advanced-toggle-extract').addEventListener('click', function() {
+            const advancedOptions = document.getElementById('advanced-options-extract');
+            if (advancedOptions.style.display === 'block') {
+                advancedOptions.style.display = 'none';
+                this.textContent = 'Afficher les options avancées ▼';
+            } else {
+                advancedOptions.style.display = 'block';
+                this.textContent = 'Masquer les options avancées ▲';
+            }
+        });
+        
+        // Afficher/masquer les options DWT en fonction de la méthode
+        document.getElementById('method-embed').addEventListener('change', function() {
+            const dwtOptions = document.querySelector('.dwt-options');
+            if (this.value === 'DWT-DCT') {
+                dwtOptions.style.display = 'block';
+            } else {
+                dwtOptions.style.display = 'none';
+            }
+        });
+        
+        document.getElementById('method-extract').addEventListener('change', function() {
+            const dwtOptions = document.querySelector('.dwt-options-extract');
+            if (this.value === 'DWT-DCT') {
+                dwtOptions.style.display = 'block';
+            } else {
+                dwtOptions.style.display = 'none';
+            }
+        });
+        
+        // Fonction pour suivre la progression d'une tâche
+        function trackTaskProgress(taskId, progressBar, resultDiv, callback) {
+            const interval = setInterval(() => {
+                fetch(`/api/task/${taskId}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'completed') {
+                            clearInterval(interval);
+                            progressBar.style.width = '100%';
+                            progressBar.textContent = '100%';
+                            if (callback) callback(data);
+                        } else if (data.status === 'error') {
+                            clearInterval(interval);
+                            progressBar.style.width = '100%';
+                            progressBar.style.backgroundColor = '#f44336';
+                            progressBar.textContent = 'Erreur';
+                            resultDiv.style.display = 'block';
+                            document.getElementById('result-text-embed').textContent = data.error || 'Une erreur est survenue';
+                        } else {
+                            const progress = data.progress || 0;
+                            progressBar.style.width = `${progress}%`;
+                            progressBar.textContent = `${progress}%`;
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Erreur lors du suivi de la tâche:', error);
+                    });
+            }, 1000);
+        }
+        
+        // Formulaire d'insertion de watermark
+        document.getElementById('embed-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData(this);
+            const progressContainer = document.getElementById('progress-container-embed');
+            const progressBar = document.getElementById('progress-bar-embed');
+            const resultDiv = document.getElementById('result-embed');
+            
+            // Afficher la barre de progression
+            progressContainer.style.display = 'block';
+            progressBar.style.width = '0%';
+            progressBar.textContent = '0%';
+            resultDiv.style.display = 'none';
+            
+            // Envoyer la requête
+            fetch('/api/embed', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                
+                // Suivre la progression
+                trackTaskProgress(data.task_id, progressBar, resultDiv, function(taskData) {
+                    resultDiv.style.display = 'block';
+                    document.getElementById('result-text-embed').textContent = `Watermark inséré avec succès. Force de modulation finale: ${data.final_modulation}`;
+                    
+                    // Créer un lien de téléchargement
+                    const downloadContainer = document.getElementById('download-container');
+                    downloadContainer.innerHTML = '';
+                    const downloadLink = document.createElement('a');
+                    downloadLink.href = `data:audio/${data.filename.split('.').pop()};base64,${data.file_data}`;
+                    downloadLink.download = data.filename;
+                    downloadLink.textContent = 'Télécharger le fichier audio avec watermark';
+                    downloadLink.style.display = 'block';
+                    downloadLink.style.marginTop = '10px';
+                    downloadLink.classList.add('button');
+                    downloadLink.style.textDecoration = 'none';
+                    downloadLink.style.backgroundColor = '#4CAF50';
+                    downloadLink.style.color = 'white';
+                    downloadLink.style.padding = '10px 15px';
+                    downloadLink.style.borderRadius = '4px';
+                    downloadLink.style.textAlign = 'center';
+                    downloadContainer.appendChild(downloadLink);
+                });
+            })
+            .catch(error => {
+                progressBar.style.width = '100%';
+                progressBar.style.backgroundColor = '#f44336';
+                progressBar.textContent = 'Erreur';
+                resultDiv.style.display = 'block';
+                document.getElementById('result-text-embed').textContent = error.message || 'Une erreur est survenue';
+            });
+        });
+        
+        // Formulaire d'extraction de watermark
+        document.getElementById('extract-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData(this);
+            const progressContainer = document.getElementById('progress-container-extract');
+            const progressBar = document.getElementById('progress-bar-extract');
+            const resultDiv = document.getElementById('result-extract');
+            
+            // Afficher la barre de progression
+            progressContainer.style.display = 'block';
+            progressBar.style.width = '0%';
+            progressBar.textContent = '0%';
+            resultDiv.style.display = 'none';
+            
+            // Envoyer la requête
+            fetch('/api/extract', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                
+                // Suivre la progression
+                trackTaskProgress(data.task_id, progressBar, resultDiv, function(taskData) {
+                    resultDiv.style.display = 'block';
+                    document.getElementById('result-text-extract').textContent = data.extracted_watermark || 'Aucun watermark détecté';
+                });
+            })
+            .catch(error => {
+                progressBar.style.width = '100%';
+                progressBar.style.backgroundColor = '#f44336';
+                progressBar.textContent = 'Erreur';
+                resultDiv.style.display = 'block';
+                document.getElementById('result-text-extract').textContent = error.message || 'Une erreur est survenue';
+            });
+        });
+    </script>
+</body>
+</html>
+"""
 
 def get_audio_format(filepath):
     ext = os.path.splitext(filepath)[1].lower().replace('.', '')
@@ -549,7 +1083,7 @@ class AudioWatermarker:
         seed = seed or self.seed
         current_modulation = modulation_strength if modulation_strength is not None else self.modulation_strength
         max_modulation = 0.5
-        watermark_fixed = watermark.ljust(80)[:80]
+        watermark_fixed = watermark.ljust(12)[:12]
         sample_rate = 44100
         if isinstance(audio, tuple) and len(audio) >= 2:
             audio, sample_rate = audio[:2]
@@ -614,7 +1148,7 @@ watermarker = AudioWatermarker()
 
 @app.route('/')
 def index():
-    return render_template_string(open('app.html', 'r', encoding='utf-8').read())
+    return render_template_string(HTML_TEMPLATE)
 
 @app.route('/api/embed', methods=['POST'])
 def embed_watermark():
@@ -634,8 +1168,8 @@ def embed_watermark():
         if not watermark_text:
             return jsonify({"error": "Texte du watermark requis"}), 400
             
-        if len(watermark_text) > 80:
-            return jsonify({"error": "Le texte du watermark ne peut dépasser 80 caractères"}), 400
+        if len(watermark_text) > 12:
+            return jsonify({"error": "Le texte du watermark ne peut dépasser 12 caractères"}), 400
             
         # Paramètres optionnels
         method = request.form.get('method', 'DCT')
@@ -673,7 +1207,7 @@ def embed_watermark():
         
         active_tasks[task_id]["progress"] = 40
         
-        watermark_fixed = watermark_text.ljust(80)[:80]
+        watermark_fixed = watermark_text.ljust(12)[:12]
         
         # Insertion du watermark
         if method == "DCT":
@@ -729,7 +1263,7 @@ def extract_watermark():
         if file.filename == '':
             return jsonify({"error": "Aucun fichier sélectionné"}), 400
             
-        watermark_length = int(request.form.get('watermark_length', 80))
+        watermark_length = int(request.form.get('watermark_length', 12))
         
         # Paramètres optionnels
         method = request.form.get('method', 'DCT')
@@ -806,6 +1340,12 @@ def get_wavelets():
     wavelets = [w for w in pywt.wavelist(kind='discrete') if not w.startswith('bior') and not w.startswith('rbio')]
     return jsonify({"wavelets": wavelets})
 
+# Point de terminaison pour le health check
+@app.route('/health')
+def health_check():
+    return jsonify({"status": "ok"}), 200
+
 if __name__ == '__main__':
+    # Utiliser le port défini par l'environnement ou 5000 par défaut
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
